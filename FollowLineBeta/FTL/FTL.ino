@@ -87,7 +87,7 @@ void loop()
   
     WRITE_LCD_INT(1, 6, (int)spi_buffer[2], 4);
     
-
+    //--- red line logic -----
     while (spi_buffer[2]==1) 
     {
       WRITE_MOTOR(ML, 0);
