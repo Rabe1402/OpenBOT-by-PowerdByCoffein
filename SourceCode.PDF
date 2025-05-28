@@ -1,0 +1,194 @@
+Arduino: 
+#include "KeplerOpenBOT.h"
+ 
+float motorl_offset;
+float motorr_offset;
+float motorl_speed;
+float motorr_speed;
+float kp;
+int line_error;
+int start_normal;
+
+ 
+void setup()
+{
+  KeplerOpenBOT_INIT();
+  WRITE_LCD_CONTRAST(160);
+ 
+  motorl_offset = 20;
+  motorr_offset = 20;
+  kp = 0.5;
+}
+ 
+void loop()
+{
+ 
+  byte spi_buffer[8] = {0};
+ 
+  // read 8 Bytes from OpenMV BEGIN
+ 
+  digitalWrite(SPICAMCSPIN, LOW);
+  delay(1); 
+ 
+  if(SPI.transfer(1) == 85)
+  { 
+    spi_buffer[1]=SPI.transfer(0);
+    spi_buffer[2]=SPI.transfer(0);
+    spi_buffer[3]=SPI.transfer(0);
+    spi_buffer[4]=SPI.transfer(0);
+    spi_buffer[5]=SPI.transfer(0);
+    spi_buffer[6]=SPI.transfer(0);
+    spi_buffer[7]=SPI.transfer(0);
+  }
+  
+  digitalWrite(SPICAMCSPIN, HIGH);
+  // read 8 Bytes from OpenMV END
+ 
+  //--- Button logic -----
+  if (READ_BUTTON_CLOSED(B1)==1) 
+  {
+    start_normal = 1;
+    WRITE_LCD_CLEAR(); 
+  }
+
+  if (READ_BUTTON_CLOSED(B4)==1) 
+  {
+    start_normal = 0; 
+    WRITE_LCD_CLEAR();
+    WRITE_MOTOR(ML, 0);
+    WRITE_MOTOR(MR, 0);
+  }
+
+  if (start_normal==0) 
+  {
+    Serial.println("no program selected");
+    Serial.println("press button B1 for normal startup");
+    WRITE_LCD_TEXT(1, 1, "Select Program");
+    WRITE_LCD_TEXT(1, 2, "B1 for normal startup");
+    delay(100); 
+  }
+
+  if (start_normal==1) 
+  {
+   line_error = spi_buffer[1] - 100;
+    motorl_speed = motorl_offset - kp * line_error;
+    motorr_speed = motorr_offset + kp * line_error;
+ 
+    WRITE_MOTOR(ML,(int)motorl_speed);
+    WRITE_MOTOR(MR,(int)motorr_speed);
+ 
+    WRITE_LCD_TEXT(1,1,"Angle:");
+    WRITE_LCD_INT(7,2,line_error,4);
+ 
+    WRITE_LCD_TEXT(3,4,"ML");
+    WRITE_LCD_INT(1,5,(int)motorl_speed,4);
+ 
+    WRITE_LCD_TEXT(12,4,"MR");
+    WRITE_LCD_INT(10,5,(int)motorr_speed,4);
+  
+    WRITE_LCD_INT(1, 6, (int)spi_buffer[2], 4);
+    
+    //--- red line logic -----
+    while (spi_buffer[2]==1) 
+    {
+      WRITE_MOTOR(ML, 0);
+      WRITE_MOTOR(MR, 0);
+      WRITE_LCD_CLEAR(); 
+      WRITE_LCD_TEXT(1, 1, "RED LINE");
+      WRITE_LCD_TEXT(1, 2, "END OF CODE");
+    } 
+  }
+}
+
+
+Kamera: 
+
+import pyb, sensor, image, time, math
+ 
+# ******************** SPI SEND INTERUPT ********************
+spi = pyb.SPI(2, pyb.SPI.SLAVE, polarity=0, phase=0)
+led_red = pyb.LED(1)
+led_green = pyb.LED(2)
+spi_list = [85, 0, 0, 0, 0, 0, 0, 0]
+spi_data = bytearray(spi_list)
+def nss_callback(line):
+    global spi, spi_data
+    try:
+        spi.send(spi_data, timeout=1000)
+        led_green.on()
+        led_red.off()
+        print(spi_data)
+    except OSError as err:
+        led_green.off()
+        led_red.on()
+        pass
+ 
+pyb.ExtInt(pyb.Pin("P3"), pyb.ExtInt.IRQ_FALLING, pyb.Pin.PULL_UP, nss_callback)
+ 
+# ******************** IMAGE DETECTION ********************
+ 
+GRAYSCALE_THRESHOLD = [(0, 64, -28, 7, -9, 16)]
+ 
+ROIS = [
+        (0, 100, 160, 20, 0.7),
+        (0,  50, 160, 20, 0.3),
+        (0,   0, 160, 20, 0.1)
+       ]
+       
+RED_THRESHOLD = [(24, 65, 23, 60, 0, 52)] 
+
+RROIS = [
+         (0, 100, 160, 20)
+        ]
+ 
+weight_sum = 0
+ 
+for r in ROIS: weight_sum += r[4]
+ 
+sensor.reset()
+sensor.set_pixformat(sensor.RGB565)
+sensor.set_framesize(sensor.QQVGA)
+sensor.set_vflip(True)
+sensor.set_hmirror(True)
+sensor.skip_frames(time = 2000)
+sensor.set_auto_gain(False)
+sensor.set_auto_whitebal(False)
+clock = time.clock()
+ 
+while(True):
+    # ***** IMAGE DETECTION CODE *****
+    clock.tick()
+    img = sensor.snapshot()
+    centroid_sum = 0
+    for r in ROIS:
+        blobs = img.find_blobs(GRAYSCALE_THRESHOLD, roi=r[0:4], merge=True)
+        if blobs:
+            largest_blob = max(blobs, key=lambda b: b.pixels())
+            img.draw_rectangle(largest_blob.rect())
+            img.draw_cross(largest_blob.cx(), largest_blob.cy())
+            centroid_sum += largest_blob.cx() * r[4]
+    center_pos = (centroid_sum / weight_sum) # Determine center of line.
+    deflection_angle = 0
+    deflection_angle = -math.atan((center_pos-80)/60)
+    deflection_angle = math.degrees(deflection_angle)
+    
+    # Find red line
+    for r in RROIS:
+        redline = 0
+        blobs = img.find_blobs(RED_THRESHOLD, roi=r[0:4], merge=True)
+        if blobs:
+            largest_blob = max(blobs, key=lambda b: b.pixels())
+            img.draw_rectangle(largest_blob.rect(), color=(255, 0, 0))
+            img.draw_cross(largest_blob.cx(), largest_blob.cy(), color=(255, 0, 0))
+            redline = 1
+            
+            
+    # ***** SET and SEND VALUES over SPI to ARDUINO *****
+    spi_list[1]=int(deflection_angle)+100
+    spi_list[2]=int(redline)
+    spi_data = bytearray(spi_list)
+    # print("Turn Angle: %f" % deflection_angle)
+    # print("FPS: " + str(clock.fps()))
+    print(spi_list)
+
+    Fals von interresse hier der link zu unsere GitHub Repo: https://github.com/Rabe1402/OpenBOT-by-PowerdByCoffein
